@@ -211,14 +211,22 @@ def run_pipeline(
     do_plot: bool = False,
     x_span: float = 0.210,
     y_span: float = 0.290,
+    epsilon_px: float | None = None,
+    decimate: int = 1
 ) -> PipelineOutputs:
     """High-level convenience wrapper for the full flow."""
     img = load_image(image_path)
     gray, thresh, edges = preprocess(img)
     contours = find_contours(edges)
+    contours = simplify_contours(contours, epsilon_px=epsilon_px)
     overlay = draw_contours_overlay(img, contours)
 
     traj = contours_to_trajectory(contours)
+    if decimate and decimate > 1:
+        before = len(traj)
+        traj = decimate_trajectory_keep_lifts(traj, stride=decimate)
+    logging.info("Decimated trajectory: %d → %d points (stride=%d)", before, len(traj), decimate)
+
     traj_scaled = normalize_xy_to_workspace(traj, x_span=x_span, y_span=y_span)
 
     logging.info("Contours found: %d", len(contours))
@@ -243,6 +251,39 @@ def run_pipeline(
         trajectory_xyz=traj_scaled,
     )
 
+def simplify_contours(contours: List[np.ndarray], epsilon_px: float | None = None) -> List[np.ndarray]:
+    if not epsilon_px or epsilon_px <= 0:
+        return contours
+    out: List[np.ndarray] = []
+    for c in contours:
+        peri = cv2.arcLength(c, True)
+        eps = min(float(epsilon_px), max(1e-6, 0.25 * peri))
+        c2 = cv2.approxPolyDP(c, eps, True)
+        out.append(c2 if len(c2) >= 2 else c)
+    return out
+
+
+def decimate_trajectory_keep_lifts(traj_xyz: np.ndarray, stride: int) -> np.ndarray:
+    if stride <= 1 or traj_xyz.size == 0:
+        return traj_xyz
+    kept: List[np.ndarray] = []
+    i, n = 0, len(traj_xyz)
+    while i < n:
+        s = i
+        while i < n and np.isclose(traj_xyz[i, 2], 0.0, atol=1e-12):
+            i += 1
+        e = i  # draw segment [s:e)
+        if e > s:
+            seg = traj_xyz[s:e]
+            idx = [0] + [k for k in range(1, len(seg) - 1) if k % stride == 0]
+            if len(seg) > 1:
+                idx.append(len(seg) - 1)
+            kept.append(seg[np.unique(idx)])
+        if i < n and traj_xyz[i, 2] > 0:
+            kept.append(traj_xyz[i:i+1])  # keep lift
+            i += 1
+    return np.vstack(kept).astype(np.float32)
+
 
 # -------------------------- CLI -------------------------- #
 
@@ -257,6 +298,10 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                    help="Optional path to save trajectory as .npy (Nx3).")
     p.add_argument("--x-span", type=float, default=0.210, help="Target span for X normalization.")
     p.add_argument("--y-span", type=float, default=0.290, help="Target span for Y normalization.")
+    p.add_argument("--epsilon-px", type=float, default=0.0,
+                   help="Simplify contours with approxPolyDP; epsilon in pixels (0=off).")
+    p.add_argument("--decimate", type=int, default=1,
+                   help="Keep every Nth point on draw segments; keep lifts/endpoints (1=off).")
     p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv).")
     return p.parse_args(argv)
 
@@ -280,6 +325,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         do_plot=args.plot,
         x_span=args.x_span,
         y_span=args.y_span,
+        epsilon_px=args.epsilon_px if args.epsilon_px > 0 else None,
+        decimate=max(1, args.decimate),
     )
 
     if args.save_overlay:

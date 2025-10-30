@@ -6,3 +6,7 @@ Comand to launch:
 ```shell
 python ur5 _run_trajectory <ip> --traj <path_file> --z-offset 0.015 --ext-urcap --urcap-port 50001 -v -v
 ```
+
+```shell
+python icecube_proc.py <img> --plot -v --save-trajectory <name> --x-span 0.4 --y-span 0.25
+```
