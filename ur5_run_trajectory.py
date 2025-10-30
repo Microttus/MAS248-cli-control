@@ -183,7 +183,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         robot_mode = rtde_r.getRobotMode()
         safety_mode = rtde_r.getSafetyMode()
         speed_scaling = rtde_r.getSpeedScaling()  # 0.0..1.0 (speed slider)
-        prog_running = rtde_r.isProgramRunning()
+        prog_running = rtde_c.isProgramRunning()
 
         logging.info(
             "Waypoints: %d (vel=%.3f m/s, acc=%.3f m/s^2, blend=%.3f m)",
