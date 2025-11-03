@@ -117,7 +117,7 @@ def _build_movel_path(
 
     path: List[List[float]] = []
     for xi, yi, zi in zip(x, y, z):
-        path.append([float(xi), float(yi), float(zi), rx, ry, rz])
+        path.append([float(xi), float(yi), float(zi), rx, ry, rz, vel, acc, blend])
     return path
 
 
@@ -143,14 +143,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     flags = 0
     if args.ext_urcap:
         # In Python API: RTDEControlInterface.FLAG_USE_EXT_UR_CAP
-        flags = rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP  # type: ignore[attr-defined]
-
-    # Connect Receive first for diagnostics on 30004
-    try:
-        rtde_r = rtde_receive.RTDEReceiveInterface(args.robot_ip)
-    except Exception as e:
-        logging.error("RTDEReceive connect failed to %s port: %s", args.robot_ip, e)
-        return 3
+        # flags = rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP  # type: ignore[attr-defined]
+        flags = rtde_control.RTDEControlInterface.FLAG_CUSTOM_SCRIPT
 
     # Then Control (RTDE). URCap port only matters with ExternalControl.
     try:
@@ -164,6 +158,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         logging.error("RTDEControl connect failed to %s, URCap %d: %s",
                       args.robot_ip, args.urcap_port, e)
         return 4
+
+    # Connect Receive first for diagnostics on 30004
+    try:
+        rtde_r = rtde_receive.RTDEReceiveInterface(args.robot_ip)
+    except Exception as e:
+        logging.error("RTDEReceive connect failed to %s port: %s", args.robot_ip, e)
+        return 3
 
     # Graceful shutdown
     stop = {"value": False}
@@ -195,17 +196,13 @@ def main(argv: Iterable[str] | None = None) -> int:
                      robot_mode, safety_mode, speed_scaling, prog_running)
         logging.debug("First waypoint: %s", path[0])
 
-        if args.ext_urcap and not prog_running:
-            logging.error("ExternalControl requested but no program is running. Press Play on pendant/URSim.")
-            return 7
-
         if args.dry_run:
             np.save("preview_path_xyz.npy", traj_xyz)
             logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
             return 0
 
         # Execute linear path with blending; check return value.
-        rtde_c.moveL(path, args.vel, args.acc)
+        rtde_c.moveL(path)
         rtde_c.stopScript()
 
     finally:
