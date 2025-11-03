@@ -117,7 +117,7 @@ def _build_movel_path(
 
     path: List[List[float]] = []
     for xi, yi, zi in zip(x, y, z):
-        path.append([float(xi), float(yi), float(zi), rx, ry, rz, vel, acc, blend])
+        path.append([float(xi), float(yi), float(zi), rx, ry, rz])
     return path
 
 
@@ -149,7 +149,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         rtde_r = rtde_receive.RTDEReceiveInterface(args.robot_ip)
     except Exception as e:
-        logging.error("RTDEReceive connect failed to %s (port 30004): %s", args.robot_ip, e)
+        logging.error("RTDEReceive connect failed to %s port: %s", args.robot_ip, e)
         return 3
 
     # Then Control (RTDE). URCap port only matters with ExternalControl.
@@ -176,6 +176,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         # Use current TCP orientation; keep orientation consistent across path.
         tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
         tcp_rvec = tcp_pose[3:6]
+
+        logging.info("TCP Pose: %s", tcp_pose)
 
         path = _build_movel_path(traj_xyz, tcp_rvec, args.vel, args.acc, args.blend)
 
@@ -206,7 +208,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             return 0
 
         # Execute linear path with blending; check return value.
-        ok = rtde_c.moveL(path)  # list of [x,y,z,rx,ry,rz,v,a,blend]
+        ok = rtde_c.moveL(path, args.vel, args.acc)
         if not ok:
             logging.error("moveL(path) was rejected by the controller (returned False). Check modes/limits.")
             return 8
