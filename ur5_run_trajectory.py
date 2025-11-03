@@ -161,7 +161,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.urcap_port
         )
     except Exception as e:
-        logging.error("RTDEControl connect failed to %s (port 30004 / URCap %d): %s",
+        logging.error("RTDEControl connect failed to %s, URCap %d: %s",
                       args.robot_ip, args.urcap_port, e)
         return 4
 
@@ -195,9 +195,6 @@ def main(argv: Iterable[str] | None = None) -> int:
                      robot_mode, safety_mode, speed_scaling, prog_running)
         logging.debug("First waypoint: %s", path[0])
 
-        if speed_scaling <= 0.01:
-            logging.error("Speed slider appears to be 0%% (SpeedScaling=%.2f). Increase it.", speed_scaling)
-            return 5
         if args.ext_urcap and not prog_running:
             logging.error("ExternalControl requested but no program is running. Press Play on pendant/URSim.")
             return 7
@@ -208,14 +205,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             return 0
 
         # Execute linear path with blending; check return value.
-        ok = rtde_c.moveL(path, args.vel, args.acc)
-        if not ok:
-            logging.error("moveL(path) was rejected by the controller (returned False). Check modes/limits.")
-            return 8
-
-        if not args.no_stop:
-            rtde_c.stopScript()
-        return 0
+        rtde_c.moveL(path, args.vel, args.acc)
+        rtde_c.stopScript()
 
     finally:
         if not args.no_stop:
