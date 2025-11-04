@@ -46,7 +46,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--z-offset", type=float, default=0.0,
                    help="Calibration Z-offset (meters) added to all points.")
     p.add_argument("--base-offset", type=float, nargs=3, metavar=("X0", "Y0", "Z0"),
-                   default=[0.300, -0.200, 0.100],
+                   default=[0.000, 0.400, 0.000],
                    help="Base frame offset added to path (meters).")
     p.add_argument("--vel", type=float, default=0.15, help="Linear velocity (m/s).")
     p.add_argument("--acc", type=float, default=0.25, help="Linear acceleration (m/s^2).")
@@ -79,6 +79,7 @@ def _load_or_build_traj(args: argparse.Namespace) -> np.ndarray:
         traj = np.load(args.traj).astype(np.float32)
         if traj.ndim != 2 or traj.shape[1] != 3:
             raise ValueError(f"Expected Nx3 trajectory, got {traj.shape}")
+        print(f"Received path! First, second and last points: 0:{traj[0]}, 1:{traj[1]}, -1:{traj[-1]}")
         return traj
 
     if run_pipeline is None:
@@ -143,8 +144,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     flags = 0
     if args.ext_urcap:
         # In Python API: RTDEControlInterface.FLAG_USE_EXT_UR_CAP
-        # flags = rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP  # type: ignore[attr-defined]
-        flags = rtde_control.RTDEControlInterface.FLAG_CUSTOM_SCRIPT
+        flags = rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP  # type: ignore[attr-defined]
 
     # Then Control (RTDE). URCap port only matters with ExternalControl.
     try:
@@ -173,44 +173,39 @@ def main(argv: Iterable[str] | None = None) -> int:
         stop["value"] = True
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    try:
-        # Use current TCP orientation; keep orientation consistent across path.
-        tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
-        tcp_rvec = tcp_pose[3:6]
 
-        logging.info("TCP Pose: %s", tcp_pose)
+    # Use current TCP orientation; keep orientation consistent across path.
+    tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
+    tcp_rvec = tcp_pose[3:6]
 
-        path = _build_movel_path(traj_xyz, tcp_rvec, args.vel, args.acc, args.blend)
+    logging.info("TCP Pose: %s", tcp_pose)
 
-        # --- Preflight diagnostics ---
-        robot_mode = rtde_r.getRobotMode()
-        safety_mode = rtde_r.getSafetyMode()
-        speed_scaling = rtde_r.getSpeedScaling()  # 0.0..1.0 (speed slider)
-        prog_running = rtde_c.isProgramRunning()
+    path = _build_movel_path(traj_xyz, tcp_rvec, args.vel, args.acc, args.blend)
 
-        logging.info(
-            "Waypoints: %d (vel=%.3f m/s, acc=%.3f m/s^2, blend=%.3f m)",
-            len(path), args.vel, args.acc, args.blend
-        )
-        logging.info("RobotMode=%s SafetyMode=%s SpeedScaling=%.2f ProgramRunning=%s",
-                     robot_mode, safety_mode, speed_scaling, prog_running)
-        logging.debug("First waypoint: %s", path[0])
+    # --- Preflight diagnostics ---
+    robot_mode = rtde_r.getRobotMode()
+    safety_mode = rtde_r.getSafetyMode()
+    speed_scaling = rtde_r.getSpeedScaling()  # 0.0..1.0 (speed slider)
+    prog_running = rtde_c.isProgramRunning()
 
-        if args.dry_run:
-            np.save("preview_path_xyz.npy", traj_xyz)
-            logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
-            return 0
+    logging.info(
+        "Waypoints: %d (vel=%.3f m/s, acc=%.3f m/s^2, blend=%.3f m)",
+        len(path), args.vel, args.acc, args.blend
+    )
+    logging.info("RobotMode=%s SafetyMode=%s SpeedScaling=%.2f ProgramRunning=%s",
+                 robot_mode, safety_mode, speed_scaling, prog_running)
+    logging.debug("First waypoint: %s", path[0])
 
-        # Execute linear path with blending; check return value.
-        rtde_c.moveL(path)
-        rtde_c.stopScript()
+    if args.dry_run:
+        np.save("preview_path_xyz.npy", traj_xyz)
+        logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
+        return 0
 
-    finally:
-        if not args.no_stop:
-            try:
-                rtde_c.stopScript()
-            except Exception:
-                pass
+    # Execute linear path with blending; check return value.
+    rtde_c.moveL(path)
+    rtde_c.stopScript()
+
+    return 0
 
 
 if __name__ == "__main__":

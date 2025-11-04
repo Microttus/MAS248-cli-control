@@ -225,7 +225,7 @@ def run_pipeline(
     if decimate and decimate > 1:
         before = len(traj)
         traj = decimate_trajectory_keep_lifts(traj, stride=decimate)
-    logging.info("Decimated trajectory: %d → %d points (stride=%d)", before, len(traj), decimate)
+        logging.info("Decimated trajectory: %d → %d points (stride=%d)", before, len(traj), decimate)
 
     traj_scaled = normalize_xy_to_workspace(traj, x_span=x_span, y_span=y_span)
 
