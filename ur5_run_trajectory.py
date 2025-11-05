@@ -203,8 +203,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     # Moving to initial joint position
-    init_pos_deg = [-60.27, -134.74, -112.74, -124.0, -8.24, -192.42]
-    init_pos = [deg * math.pi / 180.0 for deg in init_pos_deg]
+    init_pos_deg = np.array([-60.27, -134.74, -112.74, -124.0, -8.24, -192.42])
+    init_pos = np.deg2rad(init_pos_deg)
     logging.info("Moving to initial position: %s", init_pos)
     rtde_c.moveJ(init_pos)
 
