@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import signal
 import sys
 from pathlib import Path
@@ -118,7 +119,7 @@ def _build_movel_path(
 
     path: List[List[float]] = []
     for xi, yi, zi in zip(x, y, z):
-        path.append([float(xi), float(yi), float(zi), rx, ry, rz, vel, acc, blend])
+        path.append([round(float(xi), 3), round(float(yi), 3), round(float(zi), 3), round(rx, 3), round(ry, 3), round(rz,3), vel, acc, blend])
     return path
 
 
@@ -201,7 +202,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
         return 0
 
-    # Execute linear path with blending; check return value.
+    # Moving to initial joint position
+    init_pos_deg = [-60.27, -134.74, -112.74, -124.0, -8.24, -192.42]
+    init_pos = init_pos_deg * (math.pi / 180.0)
+    logging.info("Moving to initial position: %s", init_pos)
+    rtde_c.moveJ(init_pos)
+
+    logging.info("Executing path")
     rtde_c.moveL(path)
     rtde_c.stopScript()
 
