@@ -47,7 +47,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--z-offset", type=float, default=0.0,
                    help="Calibration Z-offset (meters) added to all points.")
     p.add_argument("--base-offset", type=float, nargs=3, metavar=("X0", "Y0", "Z0"),
-                   default=[0.000, 0.400, 0.000],
+                   default=[0.000, -0.600, 0.000],
                    help="Base frame offset added to path (meters).")
     p.add_argument("--vel", type=float, default=0.15, help="Linear velocity (m/s).")
     p.add_argument("--acc", type=float, default=0.25, help="Linear acceleration (m/s^2).")
