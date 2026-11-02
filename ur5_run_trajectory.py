@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import signal
 import sys
 from pathlib import Path
@@ -51,9 +50,23 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                    help="Base frame offset added to path (meters).")
     p.add_argument("--vel", type=float, default=0.15, help="Linear velocity (m/s).")
     p.add_argument("--acc", type=float, default=0.25, help="Linear acceleration (m/s^2).")
-    p.add_argument("--blend", type=float, default=0.005, help="Blend radius per waypoint (m).")
+    p.add_argument("--blend", type=float, default=0.001,
+                   help="Blend radius for pen-down waypoints (m); clamped to half of --min-step. "
+                        "Pen up/down waypoints are never blended.")
+    p.add_argument("--min-step", type=float, default=0.003,
+                   help="Drop waypoints closer than this to the previous one (m). "
+                        "Blends overlapping between points make the controller reject the path.")
+    p.add_argument("--init-joints-deg", type=float, nargs=6, metavar="J",
+                   default=[-60.27, -134.74, -112.74, -124.0, -8.24, -192.42],
+                   help="Start pose (joint angles in degrees) with the tool pointing at the "
+                        "table. Its tool orientation is used for the whole drawing. "
+                        "CALIBRATE THIS for your robot/table.")
+    p.add_argument("--no-init", action="store_true",
+                   help="Skip the move to --init-joints-deg; use the current pose/orientation.")
+    p.add_argument("-y", "--yes", action="store_true", help="Do not ask for confirmation before moving.")
     p.add_argument("--ext-urcap", action="store_true",
-                   help="Use ExternalControl URCap flag for control interface.")
+                   help="Use the ExternalControl URCap instead of uploading the control script. "
+                        "Not needed on a UR5e with default settings.")
     p.add_argument("--rtde-hz", type=float, default=-1.0,
                    help="RTDE communication frequency (Hz). -1 lets library decide.")
     p.add_argument("--urcap-port", type=int, default=50002,
@@ -106,6 +119,21 @@ def _apply_offsets(traj_xyz: np.ndarray,
     return out
 
 
+def _prune_close_points(xyz: np.ndarray, min_step: float) -> np.ndarray:
+    """Drops points closer than min_step to the last kept one.
+
+    Points where Z changes (pen up/down) are always kept, as are the endpoints.
+    """
+    z = xyz[:, 2]
+    keep = [0]
+    for i in range(1, len(xyz) - 1):
+        z_change = z[i] != z[i - 1] or z[i] != z[i + 1]
+        if z_change or np.linalg.norm(xyz[i] - xyz[keep[-1]]) >= min_step:
+            keep.append(i)
+    keep.append(len(xyz) - 1)
+    return xyz[keep]
+
+
 def _build_movel_path(
     xyz_path: np.ndarray,
     tcp_rvec: Sequence[float],
@@ -113,13 +141,20 @@ def _build_movel_path(
     acc: float,
     blend: float,
 ) -> List[List[float]]:
-    """Form a moveL path where each entry is [x,y,z,rx,ry,rz, v, a, blend]."""
-    x, y, z = xyz_path[:, 0], xyz_path[:, 1], xyz_path[:, 2]
-    rx, ry, rz = float(tcp_rvec[0]), float(tcp_rvec[1]), float(tcp_rvec[2])
+    """Form a moveL path where each entry is [x,y,z,rx,ry,rz, v, a, blend].
+
+    Waypoints where the pen goes up/down and the final waypoint get blend 0 so
+    the robot actually reaches them instead of cutting the corner.
+    """
+    z = xyz_path[:, 2]
+    n = len(xyz_path)
+    rx, ry, rz = (float(r) for r in tcp_rvec)
 
     path: List[List[float]] = []
-    for xi, yi, zi in zip(x, y, z):
-        path.append([round(float(xi), 3), round(float(yi), 3), round(float(zi), 3), round(rx, 3), round(ry, 3), round(rz,3), vel, acc, blend])
+    for i, (xi, yi, zi) in enumerate(xyz_path):
+        exact = i in (0, n - 1) or z[i] != z[i - 1] or z[i] != z[i + 1]
+        path.append([float(xi), float(yi), float(zi), rx, ry, rz,
+                     vel, acc, 0.0 if exact else blend])
     return path
 
 
@@ -141,78 +176,98 @@ def main(argv: Iterable[str] | None = None) -> int:
     # Offsets (base frame & calibration Z)
     traj_xyz = _apply_offsets(traj_xyz, args.base_offset, args.z_offset)
 
-    # RTDE flags
-    flags = 0
+    # RTDE flags: by default ur_rtde uploads its own control script to the robot.
+    flags = rtde_control.RTDEControlInterface.FLAG_UPLOAD_SCRIPT  # type: ignore[attr-defined]
     if args.ext_urcap:
-        # In Python API: RTDEControlInterface.FLAG_USE_EXT_UR_CAP
         flags = rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP  # type: ignore[attr-defined]
-
-    # Then Control (RTDE). URCap port only matters with ExternalControl.
-    try:
-        rtde_c = rtde_control.RTDEControlInterface(
-            args.robot_ip,
-            args.rtde_hz,
-            flags,
-            args.urcap_port
-        )
-    except Exception as e:
-        logging.error("RTDEControl connect failed to %s, URCap %d: %s",
-                      args.robot_ip, args.urcap_port, e)
-        return 4
 
     # Connect Receive first for diagnostics on 30004
     try:
         rtde_r = rtde_receive.RTDEReceiveInterface(args.robot_ip)
     except Exception as e:
-        logging.error("RTDEReceive connect failed to %s port: %s", args.robot_ip, e)
+        logging.error("RTDEReceive connect failed to %s: %s", args.robot_ip, e)
         return 3
 
-    # Graceful shutdown
+    robot_mode = rtde_r.getRobotMode()
+    safety_mode = rtde_r.getSafetyMode()
+    logging.info("RobotMode=%s SafetyMode=%s SpeedScaling=%.2f",
+                 robot_mode, safety_mode, rtde_r.getSpeedScaling())
+    if robot_mode != 7 or safety_mode != 1:
+        logging.error("Robot not ready (mode=%s, safety=%s): need RUNNING(7) / NORMAL(1). "
+                      "Power on, release brakes and clear any protective stop.",
+                      robot_mode, safety_mode)
+        return 5
+
+    try:
+        rtde_c = rtde_control.RTDEControlInterface(
+            args.robot_ip, args.rtde_hz, flags, args.urcap_port)
+    except Exception as e:
+        logging.error("RTDEControl connect failed to %s (URCap port %d): %s",
+                      args.robot_ip, args.urcap_port, e)
+        return 4
+
     stop = {"value": False}
 
     def _sigint_handler(_sig, _frm):
+        # Halt the robot right away; the main thread then unwinds via `finally`.
         stop["value"] = True
+        try:
+            rtde_c.stopL(2.0)
+        except Exception:
+            pass
     signal.signal(signal.SIGINT, _sigint_handler)
 
+    try:
+        if not args.no_init:
+            init_pos = np.deg2rad(args.init_joints_deg)
+            logging.info("Moving to initial position: %s", init_pos)
+            if not args.yes and not args.dry_run:
+                input("Robot will move to the start pose. Press Enter to continue (Ctrl-C aborts)...")
+            if not args.dry_run:
+                rtde_c.moveJ(init_pos)
 
-    # Use current TCP orientation; keep orientation consistent across path.
-    tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
-    tcp_rvec = tcp_pose[3:6]
+        # Orientation must be read AFTER reaching the start pose.
+        tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
+        logging.info("TCP Pose: %s", tcp_pose)
 
-    logging.info("TCP Pose: %s", tcp_pose)
+        min_step = args.min_step
+        blend = min(args.blend, min_step / 2)
+        before = len(traj_xyz)
+        traj_xyz = _prune_close_points(traj_xyz, min_step)
+        path = _build_movel_path(traj_xyz, tcp_pose[3:6], args.vel, args.acc, blend)
+        logging.info("Waypoints: %d (pruned from %d; vel=%.3f m/s, acc=%.3f m/s^2, blend=%.4f m)",
+                     len(path), before, args.vel, args.acc, blend)
+        logging.debug("First waypoint: %s", path[0])
 
-    path = _build_movel_path(traj_xyz, tcp_rvec, args.vel, args.acc, args.blend)
+        if args.dry_run:
+            np.save("preview_path_xyz.npy", traj_xyz)
+            logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
+            return 0
 
-    # --- Preflight diagnostics ---
-    robot_mode = rtde_r.getRobotMode()
-    safety_mode = rtde_r.getSafetyMode()
-    speed_scaling = rtde_r.getSpeedScaling()  # 0.0..1.0 (speed slider)
-    prog_running = rtde_c.isProgramRunning()
+        if not args.yes:
+            input(f"About to draw {len(path)} waypoints. Hand on the e-stop. Press Enter to start...")
+        if stop["value"]:
+            return 130
 
-    logging.info(
-        "Waypoints: %d (vel=%.3f m/s, acc=%.3f m/s^2, blend=%.3f m)",
-        len(path), args.vel, args.acc, args.blend
-    )
-    logging.info("RobotMode=%s SafetyMode=%s SpeedScaling=%.2f ProgramRunning=%s",
-                 robot_mode, safety_mode, speed_scaling, prog_running)
-    logging.debug("First waypoint: %s", path[0])
-
-    if args.dry_run:
-        np.save("preview_path_xyz.npy", traj_xyz)
-        logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
+        logging.warning("Executing path: %d waypoints, first=%s, TCP now=%s",
+                        len(path), np.round(path[0][:3], 3), np.round(tcp_pose[:3], 3))
+        ok = rtde_c.moveL(path)
+        if stop["value"]:
+            return 130
+        if not ok:
+            first = np.array(path[0][:3])
+            cur = np.array(tcp_pose[:3])
+            logging.error(
+                "moveL(path) was rejected/failed. Current TCP=%s, first waypoint=%s "
+                "(distance %.3f m). Check reachability, protective/safety stop "
+                "(safety mode=%s, program running=%s).",
+                np.round(cur, 3), np.round(first, 3), np.linalg.norm(first - cur),
+                rtde_r.getSafetyMode(), rtde_c.isProgramRunning())
+            return 6
         return 0
-
-    # Moving to initial joint position
-    init_pos_deg = np.array([-60.27, -134.74, -112.74, -124.0, -8.24, -192.42])
-    init_pos = np.deg2rad(init_pos_deg)
-    logging.info("Moving to initial position: %s", init_pos)
-    rtde_c.moveJ(init_pos)
-
-    logging.info("Executing path")
-    rtde_c.moveL(path)
-    rtde_c.stopScript()
-
-    return 0
+    finally:
+        if not args.no_stop:
+            rtde_c.stopScript()
 
 
 if __name__ == "__main__":

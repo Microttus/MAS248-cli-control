@@ -110,46 +110,37 @@ def draw_contours_overlay(img_bgr: np.ndarray, contours: List[np.ndarray]) -> np
 
 def contours_to_trajectory(
     contours: Iterable[np.ndarray],
-    z_lift: float = 0.2,
+    z_lift: float = 0.03,
 ) -> np.ndarray:
     """Flattens contours into a sequence of (x, y, z) points.
 
-    Adds a small z-lift after each contour to emulate 'pen up'.
+    Each contour becomes: hover above its start -> descend -> draw -> lift.
+    Travel between contours happens at ``z_lift``, so the pen never drags
+    diagonally across the paper.
 
     Args:
       contours: Iterable of contour arrays.
-      z_lift: Z value inserted after each contour’s last point.
+      z_lift: Z of the 'pen up' hover points (meters).
 
     Returns:
-      (N, 3) float32 trajectory.
+      (N, 3) float32 trajectory. Pixel columns map to y and rows to x.
     """
-    xs: List[float] = []
-    ys: List[float] = []
-    zs: List[float] = []
+    chunks: List[np.ndarray] = []
 
     for cont in contours:
-        # cont shape: (M, 1, 2) → (M, 2)
-        pts = cont.reshape(-1, 2)
-        # Note: original script swapped axes; keep that behavior:
-        # x <- column index (pts[:, 0]) becomes y in image coords; preserve naming as x
-        # y <- row index (pts[:, 1]) becomes x in image coords; preserve naming as y
-        # To stay consistent with the original output:
-        #   x_coord.extend(pixel_pose[:,1])
-        #   y_coord.extend(pixel_pose[:,0])
-        xs.extend(pts[:, 1].astype(float))
-        ys.extend(pts[:, 0].astype(float))
-        zs.extend([0.0] * len(pts))
+        # cont shape: (M, 1, 2) -> (M, 2) as (col, row); swap to (x=row, y=col)
+        if len(cont) < 2:
+            continue  # a single pixel is noise, not a stroke
+        pts = cont.reshape(-1, 2)[:, ::-1].astype(float)
+        draw = np.column_stack([pts, np.zeros(len(pts))])
+        hover_start = np.array([[pts[0, 0], pts[0, 1], z_lift]])
+        hover_end = np.array([[pts[-1, 0], pts[-1, 1], z_lift]])
+        chunks.extend([hover_start, draw, hover_end])
 
-        # Add final lifted point
-        xs.append(float(pts[-1, 1]))
-        ys.append(float(pts[-1, 0]))
-        zs.append(z_lift)
-
-    if not xs:
+    if not chunks:
         return np.zeros((0, 3), dtype=np.float32)
 
-    traj = np.stack([np.array(xs), np.array(ys), np.array(zs)], axis=1).astype(np.float32)
-    return traj
+    return np.vstack(chunks).astype(np.float32)
 
 
 def normalize_xy_to_workspace(
@@ -157,12 +148,14 @@ def normalize_xy_to_workspace(
     x_span: float = 0.210,
     y_span: float = 0.290,
 ) -> np.ndarray:
-    """Normalizes X/Y independently to [0, span] ranges; Z unchanged.
+    """Scales X/Y uniformly to fit inside a [0, x_span] x [0, y_span] box.
+
+    The aspect ratio of the drawing is preserved; Z is unchanged.
 
     Args:
       traj_xyz: (N, 3) points.
-      x_span: Target span for X.
-      y_span: Target span for Y.
+      x_span: Maximum extent in X.
+      y_span: Maximum extent in Y.
 
     Returns:
       (N, 3) float32 normalized trajectory.
@@ -177,9 +170,10 @@ def normalize_xy_to_workspace(
     # Avoid division-by-zero if flat
     x_range = float(np.ptp(x)) or 1.0
     y_range = float(np.ptp(y)) or 1.0
+    scale = min(x_span / x_range, y_span / y_range)
 
-    out[:, 0] = (x - x.min()) / x_range * x_span
-    out[:, 1] = (y - y.min()) / y_range * y_span
+    out[:, 0] = (x - x.min()) * scale
+    out[:, 1] = (y - y.min()) * scale
     return out.astype(np.float32)
 
 
@@ -212,7 +206,8 @@ def run_pipeline(
     x_span: float = 0.210,
     y_span: float = 0.290,
     epsilon_px: float | None = None,
-    decimate: int = 1
+    decimate: int = 1,
+    z_lift: float = 0.03,
 ) -> PipelineOutputs:
     """High-level convenience wrapper for the full flow."""
     img = load_image(image_path)
@@ -221,11 +216,9 @@ def run_pipeline(
     contours = simplify_contours(contours, epsilon_px=epsilon_px)
     overlay = draw_contours_overlay(img, contours)
 
-    traj = contours_to_trajectory(contours)
     if decimate and decimate > 1:
-        before = len(traj)
-        traj = decimate_trajectory_keep_lifts(traj, stride=decimate)
-        logging.info("Decimated trajectory: %d → %d points (stride=%d)", before, len(traj), decimate)
+        contours = decimate_contours(contours, stride=decimate)
+    traj = contours_to_trajectory(contours, z_lift=z_lift)
 
     traj_scaled = normalize_xy_to_workspace(traj, x_span=x_span, y_span=y_span)
 
@@ -263,26 +256,15 @@ def simplify_contours(contours: List[np.ndarray], epsilon_px: float | None = Non
     return out
 
 
-def decimate_trajectory_keep_lifts(traj_xyz: np.ndarray, stride: int) -> np.ndarray:
-    if stride <= 1 or traj_xyz.size == 0:
-        return traj_xyz
-    kept: List[np.ndarray] = []
-    i, n = 0, len(traj_xyz)
-    while i < n:
-        s = i
-        while i < n and np.isclose(traj_xyz[i, 2], 0.0, atol=1e-12):
-            i += 1
-        e = i  # draw segment [s:e)
-        if e > s:
-            seg = traj_xyz[s:e]
-            idx = [0] + [k for k in range(1, len(seg) - 1) if k % stride == 0]
-            if len(seg) > 1:
-                idx.append(len(seg) - 1)
-            kept.append(seg[np.unique(idx)])
-        if i < n and traj_xyz[i, 2] > 0:
-            kept.append(traj_xyz[i:i+1])  # keep lift
-            i += 1
-    return np.vstack(kept).astype(np.float32)
+def decimate_contours(contours: List[np.ndarray], stride: int) -> List[np.ndarray]:
+    """Keeps every ``stride``-th point of each contour (plus first and last)."""
+    if stride <= 1:
+        return contours
+    out: List[np.ndarray] = []
+    for c in contours:
+        idx = np.unique(np.r_[np.arange(0, len(c), stride), len(c) - 1])
+        out.append(c[idx])
+    return out
 
 
 # -------------------------- CLI -------------------------- #
@@ -300,6 +282,7 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--y-span", type=float, default=0.290, help="Target span for Y normalization.")
     p.add_argument("--epsilon-px", type=float, default=0.0,
                    help="Simplify contours with approxPolyDP; epsilon in pixels (0=off).")
+    p.add_argument("--z-lift", type=float, default=0.03, help="Pen-up height in meters.")
     p.add_argument("--decimate", type=int, default=1,
                    help="Keep every Nth point on draw segments; keep lifts/endpoints (1=off).")
     p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v, -vv).")
@@ -327,6 +310,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         y_span=args.y_span,
         epsilon_px=args.epsilon_px if args.epsilon_px > 0 else None,
         decimate=max(1, args.decimate),
+        z_lift=args.z_lift,
     )
 
     if args.save_overlay:

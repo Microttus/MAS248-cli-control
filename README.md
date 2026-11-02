@@ -4,7 +4,8 @@ This project aims to show how the MAS248 Robotics project at the University of A
 Comand to launch:
 
 ```shell
-python ur5 _run_trajectory <ip> --traj <path_file> --z-offset 0.015 --ext-urcap --urcap-port 50001 -v -v
+python ur5_run_trajectory.py <ip> --traj <path_file> --z-offset 0.015 --dry-run -v   # inspect first
+python ur5_run_trajectory.py <ip> --traj <path_file> --z-offset 0.015 -v
 ```
 
 ```shell
