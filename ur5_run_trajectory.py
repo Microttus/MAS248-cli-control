@@ -61,8 +61,13 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                    help="Start pose (joint angles in degrees) with the tool pointing at the "
                         "table. Its tool orientation is used for the whole drawing. "
                         "CALIBRATE THIS for your robot/table.")
+    p.add_argument("--init-pose", type=float, nargs=6, metavar=("X", "Y", "Z", "RX", "RY", "RZ"),
+                   help="Start pose as a TCP pose in the base frame (m, rotation vector in rad) "
+                        "instead of --init-joints-deg. The robot does a joint move to it using the "
+                        "inverse-kinematics solution closest to the current joints, so start from a "
+                        "sensible configuration. Its orientation is used for the whole drawing.")
     p.add_argument("--no-init", action="store_true",
-                   help="Skip the move to --init-joints-deg; use the current pose/orientation.")
+                   help="Skip the move to the start pose; use the current pose/orientation.")
     p.add_argument("-y", "--yes", action="store_true", help="Do not ask for confirmation before moving.")
     p.add_argument("--ext-urcap", action="store_true",
                    help="Use the ExternalControl URCap instead of uploading the control script. "
@@ -223,15 +228,25 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     try:
         if not args.no_init:
-            init_pos = np.deg2rad(args.init_joints_deg)
-            logging.info("Moving to initial position: %s", init_pos)
+            if args.init_pose:
+                logging.info("Moving to initial TCP pose: %s", args.init_pose)
+            else:
+                init_pos = np.deg2rad(args.init_joints_deg)
+                logging.info("Moving to initial position: %s", init_pos)
             if not args.yes and not args.dry_run:
                 input("Robot will move to the start pose. Press Enter to continue (Ctrl-C aborts)...")
             if not args.dry_run:
-                rtde_c.moveJ(init_pos)
+                if args.init_pose:
+                    if not rtde_c.moveJ_IK(list(args.init_pose)):
+                        logging.error("moveJ_IK to --init-pose failed (unreachable or unsafe pose).")
+                        return 8
+                else:
+                    rtde_c.moveJ(init_pos)
 
         # Orientation must be read AFTER reaching the start pose.
         tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
+        if args.dry_run and args.init_pose and not args.no_init:
+            tcp_pose = list(args.init_pose)  # nothing moved: use the requested start pose
         logging.info("TCP Pose: %s", tcp_pose)
 
         min_step = args.min_step

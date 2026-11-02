@@ -113,6 +113,7 @@ python ur5_run_trajectory.py <robot_ip> (--traj FILE.npy | --image IMAGE) [optio
 | `--blend` | `0.001` | Blend radius (m) for pen-down waypoints. Clamped to half of `--min-step`. Pen up/down waypoints and the endpoints are never blended. |
 | `--min-step` | `0.003` | Drop waypoints closer than this (m) to the previous one. Overlapping blends make the controller reject the path. Z-change waypoints are always kept. |
 | `--init-joints-deg J1..J6` | `-60.27 -134.74 -112.74 -124.0 -8.24 -192.42` | Start pose in degrees, tool pointing at the table. Its tool orientation is used for the whole drawing. **Calibrate this for your robot/table.** |
+| `--init-pose X Y Z RX RY RZ` | – | Start pose as a TCP pose in the base frame (m, rotation vector in rad) instead of joint angles. Uses a joint move to the IK solution closest to the current joints, so start from a sensible configuration. Its orientation is used for the whole drawing, and with `--dry-run` it is the orientation tested by `--check-points`. Read the values from the pendant's Move tab (TCP) or print them with `rtde_r.getActualTCPPose()`. |
 | `--no-init` | off | Skip the move to the start pose and use the current pose and orientation. |
 
 ### Safety and confirmation
@@ -149,6 +150,7 @@ python ur5_run_trajectory.py <robot_ip> --traj out/path.npy --ext-urcap --urcap-
 | `4` | RTDE control connection failed. |
 | `5` | Robot not ready (needs mode `RUNNING`/7 and safety `NORMAL`/1). Power on, release brakes, clear protective stops. |
 | `6` | `moveL` failed. The error output shows the current TCP, the first waypoint and the robot state. |
+| `8` | `moveJ_IK` to `--init-pose` failed. |
 | `7` | Pre-flight check found unreachable waypoints or waypoints outside the safety limits. |
 | `130` | Interrupted with Ctrl-C. |
 
