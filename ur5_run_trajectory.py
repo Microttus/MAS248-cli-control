@@ -244,6 +244,24 @@ def main(argv: Iterable[str] | None = None) -> int:
             logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
             return 0
 
+        # Pre-flight: find waypoints the robot cannot reach (these kill the control script).
+        q_ref = rtde_r.getActualQ()
+        bad = []
+        for i, wp in enumerate(path):
+            pose = wp[:6]
+            try:
+                ik_ok = len(rtde_c.getInverseKinematics(pose, q_ref)) == 6
+                safe = rtde_c.isPoseWithinSafetyLimits(pose)
+            except Exception:
+                ik_ok, safe = False, False
+            if not (ik_ok and safe):
+                bad.append(i)
+        if bad:
+            logging.error("%d/%d waypoints unreachable or outside safety limits, e.g. idx %s "
+                          "(xyz %s). Adjust --base-offset / --x-span / --y-span / --init-joints-deg.",
+                          len(bad), len(path), bad[:5], np.round(path[bad[0]][:3], 3))
+            return 7
+
         if not args.yes:
             input(f"About to draw {len(path)} waypoints. Hand on the e-stop. Press Enter to start...")
         if stop["value"]:
