@@ -74,6 +74,10 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-stop", action="store_true",
                    help="Do not call stopScript() at the end (debug).")
     p.add_argument("--dry-run", action="store_true", help="Do not move robot; only log path.")
+    p.add_argument("--check-points", action="store_true",
+                   help="Test every waypoint (inverse kinematics + safety limits) without drawing, "
+                        "print a summary and exit. Combine with --dry-run to also skip the move to "
+                        "the start pose (then the current tool orientation is tested).")
     p.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity.")
     return p.parse_args(argv)
 
@@ -242,7 +246,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.dry_run:
             np.save("preview_path_xyz.npy", traj_xyz)
             logging.warning("Dry-run enabled. Saved preview_path_xyz.npy and NOT moving the robot.")
-            return 0
+            if not args.check_points:
+                return 0
 
         # Pre-flight: find waypoints the robot cannot reach (these kill the control script).
         q_ref = rtde_r.getActualQ()
@@ -256,6 +261,20 @@ def main(argv: Iterable[str] | None = None) -> int:
                 ik_ok, safe = False, False
             if not (ik_ok and safe):
                 bad.append(i)
+        if args.check_points:
+            xyz = np.array([wp[:3] for wp in path])
+            dist = float(np.linalg.norm(xyz[0] - np.array(tcp_pose[:3])))
+            print(f"Checked {len(path)} waypoints with tool orientation {np.round(tcp_pose[3:6], 3)}")
+            print(f"  X range: {xyz[:, 0].min():.3f} .. {xyz[:, 0].max():.3f} m")
+            print(f"  Y range: {xyz[:, 1].min():.3f} .. {xyz[:, 1].max():.3f} m")
+            print(f"  Z range: {xyz[:, 2].min():.3f} .. {xyz[:, 2].max():.3f} m")
+            print(f"  First waypoint {np.round(xyz[0], 3)} is {dist:.3f} m from the current TCP")
+            if bad:
+                print(f"  UNREACHABLE / outside safety limits: {len(bad)}/{len(path)} "
+                      f"(first indices {bad[:10]}, first bad xyz {np.round(xyz[bad[0]], 3)})")
+                return 7
+            print("  All waypoints reachable and within safety limits.")
+            return 0
         if bad:
             logging.error("%d/%d waypoints unreachable or outside safety limits, e.g. idx %s "
                           "(xyz %s). Adjust --base-offset / --x-span / --y-span / --init-joints-deg.",
