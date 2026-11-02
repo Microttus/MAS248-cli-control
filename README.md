@@ -121,6 +121,7 @@ python ur5_run_trajectory.py <robot_ip> (--traj FILE.npy | --image IMAGE) [optio
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--dry-run` | off | Do not move the robot. Saves the processed path as `preview_path_xyz.npy` and exits. |
+| `--step-by-step` | off | Debug: send each waypoint as its own non-blended `moveL` and stop at the first one that fails, printing its index and xyz. Use it to find which waypoint makes the control script die. Slower than the blended path. |
 | `--check-points` | off | Test every waypoint (inverse kinematics and safety limits) and print a summary: X/Y/Z ranges, distance from the TCP to the first waypoint, and any unreachable waypoints. Does not draw. Exits with code 7 if any point fails. Add `--dry-run` to also skip the move to the start pose (the current tool orientation is then tested). |
 | `-y`, `--yes` | off | Skip the "press Enter" confirmations before moving. |
 

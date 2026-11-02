@@ -79,6 +79,9 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--no-stop", action="store_true",
                    help="Do not call stopScript() at the end (debug).")
     p.add_argument("--dry-run", action="store_true", help="Do not move robot; only log path.")
+    p.add_argument("--step-by-step", action="store_true",
+                   help="Debug: send each waypoint as its own non-blended moveL and stop at the first "
+                        "one that fails, printing its index and xyz. Slower than the blended path.")
     p.add_argument("--check-points", action="store_true",
                    help="Test every waypoint (inverse kinematics + safety limits) without drawing, "
                         "print a summary and exit. Combine with --dry-run to also skip the move to "
@@ -303,6 +306,22 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         logging.warning("Executing path: %d waypoints, first=%s, TCP now=%s",
                         len(path), np.round(path[0][:3], 3), np.round(tcp_pose[:3], 3))
+        if args.step_by_step:
+            for i, wp in enumerate(path):
+                if stop["value"]:
+                    return 130
+                ok = rtde_c.moveL(wp[:6], wp[6], wp[7])
+                if not ok or not rtde_c.isProgramRunning():
+                    prev = np.round(path[i - 1][:3], 3) if i else np.round(tcp_pose[:3], 3)
+                    logging.error("Waypoint %d/%d failed: xyz %s (from %s), safety mode=%s, "
+                                  "program running=%s. Read the pendant Log tab for the cause.",
+                                  i, len(path), np.round(wp[:3], 3), prev,
+                                  rtde_r.getSafetyMode(), rtde_c.isProgramRunning())
+                    return 6
+                if i % 50 == 0:
+                    logging.warning("Waypoint %d/%d done", i, len(path))
+            return 0
+
         ok = rtde_c.moveL(path)
         if stop["value"]:
             return 130
