@@ -42,15 +42,30 @@ seed picks the good one.
 2. Read the six joint angles (degrees) from the Move tab.
 3. Use them as `--seed-joints-deg`.
 
-The command below uses `J1 … J6` as placeholders. **Replace them with your own values.**
+The example below uses this seed, read from the pendant:
+
+| Joint | Base | Shoulder | Elbow | Wrist 1 | Wrist 2 | Wrist 3 |
+|-------|------|----------|-------|---------|---------|---------|
+| Degrees | -11.55 | -10.59 | 58.55 | -47.88 | -71.22 | -180.20 |
+| Radians | -0.2016 | -0.1848 | 1.0219 | -0.8357 | -1.2430 | -3.1451 |
+
+`--seed-joints-deg` takes **degrees**, so pass the first row as it is. The radian row is for
+reference, since the pendant shows degrees while `ur_rtde` (`getActualQ()`, `moveJ`) uses radians.
+Passing the radian values to this flag would be read as degrees, and would send the robot to a
+completely different pose. **Use your own values if your table or setup differs.**
+
+At this seed, forward kinematics (UR5e) puts the elbow about 39 cm and wrists 1-2 about 10 cm above
+the tool tip height of the start pose, but wrist 3 and the flange are only about 1 mm above it. If
+the height guard reports `wrist3` or `flange`, that is why. Check the pen mounting, or lower
+`--joint-clearance` slightly, rather than changing the other joints.
 
 ## 3. Check without moving the pen
 
 ```shell
 python ur5_run_trajectory.py <robot_ip> --traj out/mark_path.npy \
     --init-pose -0.390 -0.169 -0.151 1.461 -2.530 2.530 \
-    --seed-joints-deg J1 J2 J3 J4 J5 J6 \
-    --z-offset 0.015 --dry-run --check-points -v
+    --seed-joints-deg -11.55 -10.59 58.55 -47.88 -71.22 -180.20 \
+    --z-offset -0.251 --dry-run --check-points -v
 ```
 
 What it does:
@@ -74,15 +89,34 @@ code `9` means the start pose itself is bad with this seed.
 
 ## 4. Draw
 
-Start with a large `--z-offset` (for example `0.05`, pen 5 cm above the paper) to watch the whole
-motion in the air, then reduce it to the real calibration value.
+### Z height
+
+The start pose only gives the tool orientation. It does not set the drawing height. The path is in
+absolute base-frame coordinates:
+
+```
+pen-down z = 0.00 + base-offset z + z-offset
+pen-up   z = 0.03 + base-offset z + z-offset
+```
+
+The start pose is at z = -0.151 m, about 10 cm above the paper, so the paper is at about
+**z = -0.251 m**. That is the `--z-offset` used below. A positive value such as `0.015` would
+leave the pen about 26 cm above the paper. To calibrate, jog the pen tip until it just touches the
+paper, read the TCP z on the pendant and use that value.
+
+For the first run, add 3-5 cm (for example `--z-offset -0.21`) to watch the whole motion in the
+air, then lower it to the measured value.
+
+The drawing is placed at x 0…0.21 m, y -0.60…-0.31 m by the default `--base-offset`. The start
+pose is at x -0.39, y -0.17, so the first move crosses about half a metre sideways. Adjust
+`--base-offset` so the drawing lies on the paper.
 
 ```shell
 python ur5_run_trajectory.py <robot_ip> --traj out/mark_path.npy \
     --init-pose -0.390 -0.169 -0.151 1.461 -2.530 2.530 \
-    --seed-joints-deg J1 J2 J3 J4 J5 J6 \
+    --seed-joints-deg -11.55 -10.59 58.55 -47.88 -71.22 -180.20 \
     --base-offset 0.000 -0.600 0.000 \
-    --z-offset 0.015 \
+    --z-offset -0.251 \
     --vel 0.15 --acc 0.25 --blend 0.001 \
     -v
 ```
@@ -90,9 +124,9 @@ python ur5_run_trajectory.py <robot_ip> --traj out/mark_path.npy \
 | Option | Value | Meaning |
 |--------|-------|---------|
 | `--init-pose` | `-0.390 -0.169 -0.151 1.461 -2.530 2.530` | Start TCP pose (m, rotation vector in rad) with the correct pen orientation. |
-| `--seed-joints-deg` | `J1 … J6` | The robot moves here first, then to the IK solution of `--init-pose`. |
+| `--seed-joints-deg` | `-11.55 -10.59 58.55 -47.88 -71.22 -180.20` | The robot moves here first, then to the IK solution of `--init-pose`. |
 | `--base-offset` | `0 -0.6 0` | Moves the drawing's origin in the base frame (this is the default). Check that the drawing area lies where the paper is. |
-| `--z-offset` | `0.015` | Calibration height added to every point (m). |
+| `--z-offset` | `-0.251` | Height of the paper in the base frame (m), added to every point. See below. |
 | `--vel` / `--acc` | `0.15` / `0.25` | Pen speed (m/s) and acceleration (m/s²). |
 | `--blend` | `0.001` | Corner rounding for pen-down points (m). Pen up/down points are never blended. |
 
