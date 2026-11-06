@@ -54,7 +54,7 @@ python ur5_run_trajectory.py <robot_ip> --image icecube.png --z-offset 0.015 -v
 
 1. Loads/builds the trajectory and adds `--base-offset` and `--z-offset`.
 2. Connects to the robot and checks that it is `RUNNING` and in `NORMAL` safety mode.
-3. Moves (joint move) to `--init-joints-deg`. The tool orientation at this pose is used for the
+3. Moves (joint move) to `--seed-joints-deg` (if given) and then the IK solution of `--init-pose` (or `--init-joints-deg`). The tool orientation at this pose is used for the
    whole drawing, so this pose should have the tool pointing at the table.
 4. Drops waypoints that are closer together than `--min-step`, then builds the `moveL` path.
 5. Checks that every waypoint is reachable (inverse kinematics and safety limits). If not, it
@@ -112,8 +112,11 @@ python ur5_run_trajectory.py <robot_ip> (--traj FILE.npy | --image IMAGE) [optio
 | `--acc` | `0.25` | Linear acceleration (m/s²). |
 | `--blend` | `0.001` | Blend radius (m) for pen-down waypoints. Clamped to half of `--min-step`. Pen up/down waypoints and the endpoints are never blended. |
 | `--min-step` | `0.003` | Drop waypoints closer than this (m) to the previous one. Overlapping blends make the controller reject the path. Z-change waypoints are always kept. |
-| `--init-joints-deg J1..J6` | `-60.27 -134.74 -112.74 -124.0 -8.24 -192.42` | Start pose in degrees, tool pointing at the table. Its tool orientation is used for the whole drawing. **Calibrate this for your robot/table.** |
-| `--init-pose X Y Z RX RY RZ` | – | Start pose as a TCP pose in the base frame (m, rotation vector in rad) instead of joint angles. Uses a joint move to the IK solution closest to the current joints, so start from a sensible configuration. Its orientation is used for the whole drawing, and with `--dry-run` it is the orientation tested by `--check-points`. Read the values from the pendant's Move tab (TCP) or print them with `rtde_r.getActualTCPPose()`. |
+| `--init-joints-deg J1..J6` | – | Start pose as joint angles in degrees. If given, it replaces `--init-pose`. The tool orientation at this pose is used for the whole drawing. |
+| `--init-pose X Y Z RX RY RZ` | `-0.390 -0.169 -0.151 1.461 -2.530 2.530` | Start pose as a TCP pose in the base frame (m, rotation vector in rad). Its orientation is used for the whole drawing, and with `--dry-run` it is the orientation tested by `--check-points`. The joint solution is the IK solution closest to `--seed-joints-deg`, and it is rejected (exit code `9`) if the elbow or wrists end up below the tool tip. |
+| `--seed-joints-deg J1..J6` | current joints | Selects the IK branch (elbow/wrist configuration). The robot moves here first, then to the IK solution of `--init-pose`. Jog the robot to a configuration with the elbow and wrists above the pen, read the joint angles from the pendant and pass them here. |
+| `--robot-model {ur5,ur5e}` | `ur5e` | Kinematic parameters for the joint-height guard. |
+| `--joint-clearance M` | `0.0` | Height guard: elbow, wrist 1-3 and flange must be at least this far (m) above the tool tip at the start pose and at every waypoint. `--check-points` prints the lowest joint height; the drawing refuses to start (exit `7`) if a waypoint violates it. |
 | `--no-init` | off | Skip the move to the start pose and use the current pose and orientation. |
 
 ### Safety and confirmation
@@ -151,7 +154,8 @@ python ur5_run_trajectory.py <robot_ip> --traj out/path.npy --ext-urcap --urcap-
 | `4` | RTDE control connection failed. |
 | `5` | Robot not ready (needs mode `RUNNING`/7 and safety `NORMAL`/1). Power on, release brakes, clear protective stops. |
 | `6` | `moveL` failed. The error output shows the current TCP, the first waypoint and the robot state. |
-| `8` | `moveJ_IK` to `--init-pose` failed. |
+| `8` | No IK solution for `--init-pose` near the seed joints. |
+| `9` | The IK solution for `--init-pose` puts the elbow or a wrist below the tool tip. Use a better `--seed-joints-deg`. |
 | `7` | Pre-flight check found unreachable waypoints or waypoints outside the safety limits. |
 | `130` | Interrupted with Ctrl-C. |
 

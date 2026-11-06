@@ -35,6 +35,43 @@ import rtde_control  # type: ignore
 import rtde_receive  # type: ignore
 
 
+_UR_DH = {
+    "ur5e": {"d": [0.1625, 0.0, 0.0, 0.1333, 0.0997, 0.0996],
+             "a": [0.0, -0.425, -0.3922, 0.0, 0.0, 0.0]},
+    "ur5": {"d": [0.089159, 0.0, 0.0, 0.10915, 0.09465, 0.0823],
+            "a": [0.0, -0.425, -0.39225, 0.0, 0.0, 0.0]},
+}
+_UR_ALPHA = [np.pi / 2, 0.0, 0.0, np.pi / 2, -np.pi / 2, 0.0]
+# Frame i origin sits on the axis of joint i+1, so these are the parts to keep above the tip.
+_GUARDED = [(1, "elbow"), (2, "wrist1"), (3, "wrist2"), (4, "wrist3"), (5, "flange")]
+
+
+def _joint_heights(q: Sequence[float], model: str) -> np.ndarray:
+    """Base-frame z of the six DH frame origins for joint angles q (rad)."""
+    d, a = _UR_DH[model]["d"], _UR_DH[model]["a"]
+    T = np.eye(4)
+    z = np.zeros(6)
+    for i in range(6):
+        ct, st = np.cos(q[i]), np.sin(q[i])
+        ca, sa = np.cos(_UR_ALPHA[i]), np.sin(_UR_ALPHA[i])
+        T = T @ np.array([[ct, -st * ca, st * sa, a[i] * ct],
+                          [st, ct * ca, -ct * sa, a[i] * st],
+                          [0.0, sa, ca, d[i]],
+                          [0.0, 0.0, 0.0, 1.0]])
+        z[i] = T[2, 3]
+    return z
+
+
+def _joints_below_tip(q: Sequence[float], tip_z: float, model: str, clearance: float):
+    """Returns [(name, height_above_tip_m)] for guarded joints lower than tip_z + clearance."""
+    z = _joint_heights(q, model)
+    return [(name, float(z[i] - tip_z)) for i, name in _GUARDED if z[i] - tip_z < clearance]
+
+
+def _fmt_deg(q: Sequence[float]) -> str:
+    return " ".join(f"{np.degrees(v):.2f}" for v in q)
+
+
 def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="UR5 trajectory executor (moveL path + blend).")
     p.add_argument("robot_ip", type=str, help="Robot IP (or URSim IP).")
@@ -56,16 +93,24 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--min-step", type=float, default=0.003,
                    help="Drop waypoints closer than this to the previous one (m). "
                         "Blends overlapping between points make the controller reject the path.")
-    p.add_argument("--init-joints-deg", type=float, nargs=6, metavar="J",
-                   default=[-60.27, -134.74, -112.74, -124.0, -8.24, -192.42],
-                   help="Start pose (joint angles in degrees) with the tool pointing at the "
-                        "table. Its tool orientation is used for the whole drawing. "
-                        "CALIBRATE THIS for your robot/table.")
+    p.add_argument("--init-joints-deg", type=float, nargs=6, metavar="J", default=None,
+                   help="Start pose as joint angles in degrees. If given, it is used instead of "
+                        "--init-pose. Its tool orientation is used for the whole drawing.")
     p.add_argument("--init-pose", type=float, nargs=6, metavar=("X", "Y", "Z", "RX", "RY", "RZ"),
-                   help="Start pose as a TCP pose in the base frame (m, rotation vector in rad) "
-                        "instead of --init-joints-deg. The robot does a joint move to it using the "
-                        "inverse-kinematics solution closest to the current joints, so start from a "
-                        "sensible configuration. Its orientation is used for the whole drawing.")
+                   default=[-0.390, -0.169, -0.151, 1.461, -2.530, 2.530],
+                   help="Start pose as a TCP pose in the base frame (m, rotation vector in rad). "
+                        "Its orientation is used for the whole drawing. The joint solution is "
+                        "chosen by inverse kinematics closest to --seed-joints-deg.")
+    p.add_argument("--seed-joints-deg", type=float, nargs=6, metavar="J", default=None,
+                   help="Joint configuration that selects the inverse-kinematics branch for "
+                        "--init-pose (elbow/wrist orientation). Use a pose where the elbow and "
+                        "wrists are above the pen tip. The robot moves here first, then to the "
+                        "IK solution of --init-pose. Default: the current joints.")
+    p.add_argument("--robot-model", choices=sorted(_UR_DH), default="ur5e",
+                   help="Kinematic parameters used for the joint-height guard.")
+    p.add_argument("--joint-clearance", type=float, default=0.0,
+                   help="Height guard: elbow, wrist 1-3 and flange must be at least this far "
+                        "(m) above the tool tip, at the start pose and at every waypoint.")
     p.add_argument("--no-init", action="store_true",
                    help="Skip the move to the start pose; use the current pose/orientation.")
     p.add_argument("-y", "--yes", action="store_true", help="Do not ask for confirmation before moving.")
@@ -230,25 +275,43 @@ def main(argv: Iterable[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _sigint_handler)
 
     try:
+        q_init = None  # joint solution of the start pose (used as IK reference in dry runs)
         if not args.no_init:
-            if args.init_pose:
-                logging.info("Moving to initial TCP pose: %s", args.init_pose)
+            if args.init_joints_deg is not None:
+                q_init = list(np.deg2rad(args.init_joints_deg))
+                logging.info("Moving to initial joints: %s", np.round(q_init, 4))
             else:
-                init_pos = np.deg2rad(args.init_joints_deg)
-                logging.info("Moving to initial position: %s", init_pos)
+                q_seed = (list(np.deg2rad(args.seed_joints_deg)) if args.seed_joints_deg
+                          else list(rtde_r.getActualQ()))
+                q_init = list(rtde_c.getInverseKinematics(list(args.init_pose), q_seed))
+                if len(q_init) != 6:
+                    logging.error("No inverse-kinematics solution for --init-pose %s near seed "
+                                  "joints [%s] deg (unreachable?).", args.init_pose, _fmt_deg(q_seed))
+                    return 8
+                logging.info("Start pose %s -> joints [%s] deg (seed [%s])",
+                             args.init_pose, _fmt_deg(q_init), _fmt_deg(q_seed))
+                low = _joints_below_tip(q_init, args.init_pose[2], args.robot_model,
+                                        args.joint_clearance)
+                if low:
+                    logging.error("Start pose IK solution puts %s below the tool tip. Joints "
+                                  "[%s] deg. Pass --seed-joints-deg with a configuration where "
+                                  "the elbow and wrists are above the pen (jog the robot there "
+                                  "and read the joint angles).",
+                                  ", ".join(f"{n} ({h * 100:+.1f} cm)" for n, h in low),
+                                  _fmt_deg(q_init))
+                    return 9
             if not args.yes and not args.dry_run:
-                input("Robot will move to the start pose. Press Enter to continue (Ctrl-C aborts)...")
+                input("Robot will move to the start pose"
+                      + (" via the seed joints" if args.seed_joints_deg and not args.init_joints_deg else "")
+                      + ". Press Enter to continue (Ctrl-C aborts)...")
             if not args.dry_run:
-                if args.init_pose:
-                    if not rtde_c.moveJ_IK(list(args.init_pose)):
-                        logging.error("moveJ_IK to --init-pose failed (unreachable or unsafe pose).")
-                        return 8
-                else:
-                    rtde_c.moveJ(init_pos)
+                if args.seed_joints_deg and args.init_joints_deg is None:
+                    rtde_c.moveJ(list(np.deg2rad(args.seed_joints_deg)))
+                rtde_c.moveJ(q_init)
 
         # Orientation must be read AFTER reaching the start pose.
         tcp_pose = rtde_r.getActualTCPPose()  # [x, y, z, rx, ry, rz]
-        if args.dry_run and args.init_pose and not args.no_init:
+        if args.dry_run and not args.no_init and args.init_joints_deg is None:
             tcp_pose = list(args.init_pose)  # nothing moved: use the requested start pose
         logging.info("TCP Pose: %s", tcp_pose)
 
@@ -267,18 +330,27 @@ def main(argv: Iterable[str] | None = None) -> int:
             if not args.check_points:
                 return 0
 
-        # Pre-flight: find waypoints the robot cannot reach (these kill the control script).
-        q_ref = rtde_r.getActualQ()
-        bad = []
+        # Pre-flight: find waypoints the robot cannot reach (these kill the control script)
+        # or that need elbow/wrists below the pen tip.
+        q_ref = list(q_init) if (args.dry_run and q_init is not None) else list(rtde_r.getActualQ())
+        bad, low_idx = [], []
+        min_clear = np.inf
         for i, wp in enumerate(path):
             pose = wp[:6]
             try:
-                ik_ok = len(rtde_c.getInverseKinematics(pose, q_ref)) == 6
+                q = list(rtde_c.getInverseKinematics(pose, q_ref))
+                ik_ok = len(q) == 6
                 safe = rtde_c.isPoseWithinSafetyLimits(pose)
             except Exception:
-                ik_ok, safe = False, False
+                q, ik_ok, safe = [], False, False
             if not (ik_ok and safe):
                 bad.append(i)
+                continue
+            q_ref = q  # follow the branch the way moveL will
+            z = _joint_heights(q, args.robot_model)
+            min_clear = min(min_clear, float(min(z[k] for k, _ in _GUARDED) - pose[2]))
+            if _joints_below_tip(q, pose[2], args.robot_model, args.joint_clearance):
+                low_idx.append(i)
         if args.check_points:
             xyz = np.array([wp[:3] for wp in path])
             dist = float(np.linalg.norm(xyz[0] - np.array(tcp_pose[:3])))
@@ -287,12 +359,25 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"  Y range: {xyz[:, 1].min():.3f} .. {xyz[:, 1].max():.3f} m")
             print(f"  Z range: {xyz[:, 2].min():.3f} .. {xyz[:, 2].max():.3f} m")
             print(f"  First waypoint {np.round(xyz[0], 3)} is {dist:.3f} m from the current TCP")
+            if np.isfinite(min_clear):
+                print(f"  Lowest joint is {min_clear * 100:+.1f} cm relative to the tool tip "
+                      f"(required >= {args.joint_clearance * 100:.1f} cm)")
+            if low_idx:
+                print(f"  JOINTS BELOW TIP: {len(low_idx)}/{len(path)} waypoints "
+                      f"(first indices {low_idx[:10]}, first xyz {np.round(xyz[low_idx[0]], 3)}). "
+                      "Use a different --seed-joints-deg.")
             if bad:
                 print(f"  UNREACHABLE / outside safety limits: {len(bad)}/{len(path)} "
                       f"(first indices {bad[:10]}, first bad xyz {np.round(xyz[bad[0]], 3)})")
+            if bad or low_idx:
                 return 7
-            print("  All waypoints reachable and within safety limits.")
+            print("  All waypoints reachable, within safety limits and with joints above the tip.")
             return 0
+        if low_idx:
+            logging.error("%d/%d waypoints need the elbow/wrists below the tool tip (first idx %s, "
+                          "xyz %s). Use a different --seed-joints-deg.",
+                          len(low_idx), len(path), low_idx[:5], np.round(path[low_idx[0]][:3], 3))
+            return 7
         if bad:
             logging.error("%d/%d waypoints unreachable or outside safety limits, e.g. idx %s "
                           "(xyz %s). Adjust --base-offset / --x-span / --y-span / --init-joints-deg.",
